@@ -28,7 +28,10 @@ sessions = {}
 
 PHONE_COLUMN_KEYWORDS = [
     "phone", "mobile", "cell", "contact", "number", "mob", "ph",
-    "tel", "whatsapp", "num", "no", "fone", "mobi"
+    "tel", "whatsapp", "num", "fone", "mobi", "mobile no",
+    "alternate mobile", "alt mobile", "mobile number", "phone number",
+    "contact no", "contact number", "alternate no", "alt no",
+    "primary", "secondary", "emergenc"
 ]
 
 
@@ -246,9 +249,29 @@ async def upload_file(file: UploadFile = File(...)):
 
     try:
         if ext == "csv":
-            df = pd.read_csv(io.BytesIO(content), dtype=str, encoding="utf-8", on_bad_lines="skip")
+            # Try utf-8 first, fall back to latin-1 (common in Indian Excel exports)
+            try:
+                df = pd.read_csv(
+                    io.BytesIO(content),
+                    dtype=str,           # Force ALL columns as string - prevents scientific notation
+                    encoding="utf-8",
+                    on_bad_lines="skip",
+                    keep_default_na=False,  # Don't convert empty strings to NaN yet
+                )
+            except UnicodeDecodeError:
+                df = pd.read_csv(
+                    io.BytesIO(content),
+                    dtype=str,
+                    encoding="latin-1",
+                    on_bad_lines="skip",
+                    keep_default_na=False,
+                )
         else:
-            df = pd.read_excel(io.BytesIO(content), dtype=str)
+            df = pd.read_excel(
+                io.BytesIO(content),
+                dtype=str,           # Force ALL columns as string
+                keep_default_na=False,
+            )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to parse file: {str(e)}")
 
