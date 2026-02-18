@@ -117,6 +117,81 @@ def clean_phone_number(
     return digits  # plain 10-digit number
 
 
+
+def clean_column_vectorised(
+    series: pd.Series,
+    keep_indian_only: bool = True,
+    remove_country_code: bool = True,
+    whatsapp_format: bool = False,
+) -> pd.Series:
+    """Fast vectorised phone cleaning using pandas string operations."""
+    s = series.copy().astype(str).str.strip()
+
+    # Replace nan/None/empty with NaN
+    s = s.replace({"nan": None, "None": None, "": None, "<NA>": None})
+
+    # Handle scientific notation (e.g. 9.88E+09) — convert to integer string
+    def fix_sci(val):
+        if val is None:
+            return None
+        try:
+            f = float(val)
+            if pd.isna(f):
+                return None
+            return str(int(round(f)))
+        except (ValueError, TypeError):
+            return val
+
+    s = s.apply(fix_sci)
+
+    # Strip all non-digit characters
+    s = s.str.replace(r"\D", "", regex=True)
+
+    # Replace empty string with None
+    s = s.replace("", None)
+
+    # Normalise country codes using vectorised where conditions
+    # 0091 prefix (14 digits)
+    mask = s.notna() & s.str.startswith("0091") & (s.str.len() == 14)
+    s = s.where(~mask, s.str[4:])
+
+    # 0091 prefix (any other length)
+    mask = s.notna() & s.str.startswith("0091")
+    s = s.where(~mask, s.str[4:])
+
+    # 91 prefix (12 digits)
+    mask = s.notna() & s.str.startswith("91") & (s.str.len() == 12)
+    s = s.where(~mask, s.str[2:])
+
+    # 091 prefix (12 digits)
+    mask = s.notna() & s.str.startswith("091") & (s.str.len() == 12)
+    s = s.where(~mask, s.str[3:])
+
+    # 0 prefix (11 digits)
+    mask = s.notna() & s.str.startswith("0") & (s.str.len() == 11)
+    s = s.where(~mask, s.str[1:])
+
+    # 091 prefix (13 digits)
+    mask = s.notna() & s.str.startswith("091") & (s.str.len() == 13)
+    s = s.where(~mask, s.str[3:])
+
+    # Invalidate anything that is not exactly 10 digits
+    s = s.where(s.isna() | (s.str.len() == 10), None)
+
+    # Validate Indian mobile: must start with 6-9
+    if keep_indian_only:
+        valid_pattern = s.notna() & s.str.match(r"^[6-9]\d{9}$")
+        s = s.where(valid_pattern, None)
+
+    # Apply output format
+    if whatsapp_format:
+        s = s.where(s.isna(), "+91" + s)
+    elif not remove_country_code:
+        s = s.where(s.isna(), "91" + s)
+
+    return s
+
+
 def detect_phone_columns(df: pd.DataFrame) -> List[str]:
     detected = []
     for col in df.columns:
@@ -235,16 +310,14 @@ def clean_data(req: CleanRequest):
     duplicate_count = 0
     cleaned_cols = []
 
-    # Clean each selected column
+    # Clean each selected column using vectorised operations (fast for large files)
     for col in req.selected_columns:
         cleaned_col_name = f"{col}_cleaned"
-        df[cleaned_col_name] = df[col].apply(
-            lambda x: clean_phone_number(
-                x,
-                keep_indian_only=req.keep_indian_only,
-                remove_country_code=req.remove_country_code,
-                whatsapp_format=req.whatsapp_format,
-            )
+        df[cleaned_col_name] = clean_column_vectorised(
+            df[col],
+            keep_indian_only=req.keep_indian_only,
+            remove_country_code=req.remove_country_code,
+            whatsapp_format=req.whatsapp_format,
         )
         cleaned_cols.append(cleaned_col_name)
 
@@ -290,6 +363,13 @@ def clean_data(req: CleanRequest):
         "rows_after_cleaning": len(df),
     }
 
+    # Save cleaned file to disk immediately so download works even after server sleep
+    try:
+        out_path = os.path.join(UPLOAD_DIR, f"{req.session_id}_cleaned.xlsx")
+        df.to_excel(out_path, index=False, engine="openpyxl")
+    except Exception:
+        pass  # Non-fatal — download endpoint will retry
+
     return {
         "metrics": sessions[req.session_id]["metrics"],
         "before_preview": dataframe_preview(session["df"]),
@@ -300,19 +380,30 @@ def clean_data(req: CleanRequest):
 
 @app.get("/download/{session_id}")
 def download_file(session_id: str):
-    session = sessions.get(session_id)
-    if not session or session["cleaned_df"] is None:
-        raise HTTPException(404, "No cleaned data found. Please clean your data first.")
-
-    df = session["cleaned_df"]
-    original_name = os.path.splitext(session["filename"])[0]
+    # First check if file already saved to disk (survives server sleep)
     out_path = os.path.join(UPLOAD_DIR, f"{session_id}_cleaned.xlsx")
-    df.to_excel(out_path, index=False, engine="openpyxl")
+    
+    # Try to get filename from session or use default
+    filename = "cleaned_contacts.xlsx"
+    session = sessions.get(session_id)
+    if session:
+        original_name = os.path.splitext(session["filename"])[0]
+        filename = f"{original_name}_cleaned.xlsx"
+        # Save to disk if not already saved
+        if not os.path.exists(out_path) and session.get("cleaned_df") is not None:
+            session["cleaned_df"].to_excel(out_path, index=False, engine="openpyxl")
 
-    return FileResponse(
-        out_path,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename=f"{original_name}_cleaned.xlsx",
+    # If file exists on disk, serve it
+    if os.path.exists(out_path):
+        return FileResponse(
+            out_path,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename=filename,
+        )
+
+    raise HTTPException(
+        404,
+        "Session expired — the server restarted. Please re-upload and clean your file again, then download immediately."
     )
 
 
