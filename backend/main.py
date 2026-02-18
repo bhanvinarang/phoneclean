@@ -58,6 +58,15 @@ def clean_phone_number(
     if s == "" or s.lower() == "nan":
         return None
 
+    # Handle scientific notation e.g. 9.8765E+09 or 9.876543210e9
+    # Excel often stores large numbers this way
+    try:
+        f = float(s)
+        if not pd.isna(f):
+            s = str(int(round(f)))
+    except (ValueError, OverflowError):
+        pass
+
     # Remove ALL non-digit characters (+, -, spaces, brackets, dots, quotes etc.)
     digits = re.sub(r'\D', '', s)
 
