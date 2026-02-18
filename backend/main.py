@@ -389,8 +389,15 @@ def clean_data(req: CleanRequest):
     # Save cleaned file to disk immediately so download works even after server sleep
     try:
         out_path = os.path.join(UPLOAD_DIR, f"{req.session_id}_cleaned.xlsx")
-        df.to_excel(out_path, index=False, engine="openpyxl")
-    except Exception:
+        # Clean the dataframe before writing — replace None/nan with empty string
+        df_export = df.copy()
+        df_export = df_export.fillna("")
+        # Ensure all values are plain strings — no floats, no ints
+        for col in df_export.columns:
+            df_export[col] = df_export[col].astype(str).replace("nan", "")
+        df_export.to_excel(out_path, index=False, engine="openpyxl")
+    except Exception as e:
+        print(f"Save error: {e}")
         pass  # Non-fatal — download endpoint will retry
 
     return {
@@ -418,6 +425,19 @@ def download_file(session_id: str):
 
     # If file exists on disk, serve it
     if os.path.exists(out_path):
+        # Re-export cleanly to avoid Excel corruption
+        try:
+            import openpyxl
+            df_check = pd.read_excel(out_path, dtype=str)
+        except Exception:
+            # File is corrupted — try to rebuild from session
+            session = sessions.get(session_id)
+            if session and session.get("cleaned_df") is not None:
+                df_export = session["cleaned_df"].copy().fillna("")
+                for col in df_export.columns:
+                    df_export[col] = df_export[col].astype(str).replace("nan", "")
+                df_export.to_excel(out_path, index=False, engine="openpyxl")
+
         return FileResponse(
             out_path,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
