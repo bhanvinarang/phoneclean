@@ -417,11 +417,19 @@ def clean_data(req: CleanRequest):
 
     # Save cleaned file to disk immediately so download works even after server sleep
     try:
-        out_path = os.path.join(UPLOAD_DIR, f"{req.session_id}_cleaned.xlsx")
-        safe_write_excel(df, out_path)
+        ext = session["filename"].rsplit(".", 1)[-1].lower()
+        if ext == "csv":
+            out_path = os.path.join(UPLOAD_DIR, f"{req.session_id}_cleaned.csv")
+            df_export = df.copy()
+            for col in df_export.columns:
+                df_export[col] = df_export[col].fillna("").astype(str).replace("nan", "")
+            df_export.to_csv(out_path, index=False, encoding="utf-8-sig")
+        else:
+            out_path = os.path.join(UPLOAD_DIR, f"{req.session_id}_cleaned.xlsx")
+            safe_write_excel(df, out_path)
     except Exception as e:
         print(f"Save error: {e}")
-        pass  # Non-fatal — download endpoint will retry
+        pass
 
     return {
         "metrics": sessions[req.session_id]["metrics"],
@@ -433,44 +441,35 @@ def clean_data(req: CleanRequest):
 
 @app.get("/download/{session_id}")
 def download_file(session_id: str):
-    # First check if file already saved to disk (survives server sleep)
-    out_path = os.path.join(UPLOAD_DIR, f"{session_id}_cleaned.xlsx")
-    
-    # Try to get filename from session or use default
-    filename = "cleaned_contacts.xlsx"
     session = sessions.get(session_id)
-    if session:
-        original_name = os.path.splitext(session["filename"])[0]
-        filename = f"{original_name}_cleaned.xlsx"
-        # Save to disk if not already saved
-        if not os.path.exists(out_path) and session.get("cleaned_df") is not None:
-            session["cleaned_df"].to_excel(out_path, index=False, engine="openpyxl")
+    if not session or session.get("cleaned_df") is None:
+        raise HTTPException(404, "Session expired — please re-upload and clean your file again.")
 
-    # If file exists on disk, serve it
-    if os.path.exists(out_path):
-        # Re-export cleanly to avoid Excel corruption
-        try:
-            import openpyxl
-            df_check = pd.read_excel(out_path, dtype=str)
-        except Exception:
-            # File is corrupted — try to rebuild from session
-            session = sessions.get(session_id)
-            if session and session.get("cleaned_df") is not None:
-                df_export = session["cleaned_df"].copy().fillna("")
-                for col in df_export.columns:
-                    df_export[col] = df_export[col].astype(str).replace("nan", "")
-                df_export.to_excel(out_path, index=False, engine="openpyxl")
+    df = session["cleaned_df"]
+    original_name = os.path.splitext(session["filename"])[0]
+    ext = session["filename"].rsplit(".", 1)[-1].lower()
 
+    # Return same format as uploaded — CSV in, CSV out. Excel in, Excel out.
+    if ext == "csv":
+        out_path = os.path.join(UPLOAD_DIR, f"{session_id}_cleaned.csv")
+        # Clean values before writing
+        df_export = df.copy()
+        for col in df_export.columns:
+            df_export[col] = df_export[col].fillna("").astype(str).replace("nan", "")
+        df_export.to_csv(out_path, index=False, encoding="utf-8-sig")  # utf-8-sig adds BOM for Excel compatibility
+        return FileResponse(
+            out_path,
+            media_type="text/csv",
+            filename=f"{original_name}_cleaned.csv",
+        )
+    else:
+        out_path = os.path.join(UPLOAD_DIR, f"{session_id}_cleaned.xlsx")
+        safe_write_excel(df, out_path)
         return FileResponse(
             out_path,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            filename=filename,
+            filename=f"{original_name}_cleaned.xlsx",
         )
-
-    raise HTTPException(
-        404,
-        "Session expired — the server restarted. Please re-upload and clean your file again, then download immediately."
-    )
 
 
 @app.get("/report/{session_id}")
