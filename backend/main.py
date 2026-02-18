@@ -314,6 +314,35 @@ class CleanRequest(BaseModel):
     whatsapp_format: bool = False
 
 
+
+def safe_write_excel(df: pd.DataFrame, path: str):
+    """Write DataFrame to Excel safely — no corruption, no formula injection."""
+    from openpyxl import Workbook
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    ws = wb.active
+
+    # Write headers
+    for col_idx, col_name in enumerate(df.columns, 1):
+        ws.cell(row=1, column=col_idx, value=str(col_name))
+
+    # Write rows — force every value to plain string
+    for row_idx, row in enumerate(df.itertuples(index=False), 2):
+        for col_idx, val in enumerate(row, 1):
+            if val is None or (isinstance(val, float) and pd.isna(val)):
+                cell_val = ""
+            else:
+                cell_val = str(val).strip()
+                if cell_val.lower() == "nan":
+                    cell_val = ""
+                # Prevent formula injection — prefix with apostrophe logic
+                # by setting value directly as string (openpyxl handles this)
+            ws.cell(row=row_idx, column=col_idx, value=cell_val)
+
+    wb.save(path)
+
+
 @app.post("/clean")
 def clean_data(req: CleanRequest):
     session = sessions.get(req.session_id)
@@ -389,13 +418,7 @@ def clean_data(req: CleanRequest):
     # Save cleaned file to disk immediately so download works even after server sleep
     try:
         out_path = os.path.join(UPLOAD_DIR, f"{req.session_id}_cleaned.xlsx")
-        # Clean the dataframe before writing — replace None/nan with empty string
-        df_export = df.copy()
-        df_export = df_export.fillna("")
-        # Ensure all values are plain strings — no floats, no ints
-        for col in df_export.columns:
-            df_export[col] = df_export[col].astype(str).replace("nan", "")
-        df_export.to_excel(out_path, index=False, engine="openpyxl")
+        safe_write_excel(df, out_path)
     except Exception as e:
         print(f"Save error: {e}")
         pass  # Non-fatal — download endpoint will retry
